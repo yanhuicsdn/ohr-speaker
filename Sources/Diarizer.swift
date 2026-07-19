@@ -283,17 +283,40 @@ private func bestSpeaker(
 
 // MARK: - Auto-Tuning
 
-/// Ground-truth speaker sequence for the reference audio file.
-/// Obtained from the manually corrected transcript of the DJI meeting audio (7 speakers).
-private let groundTruthSequence: [String] = [
-    "S1", "S2", "S3", "S4", "S3", "S4", "S3", "S4", "S3", "S4",
-    "S3", "S4", "S3", "S2", "S3", "S2", "S3", "S4", "S5", "S4",
-    "S5", "S3", "S5", "S4", "S3", "S5", "S4", "S5", "S4", "S5",
-    "S4", "S5", "S4", "S5", "S3", "S1", "S3", "S1", "S3", "S5",
-    "S4", "S5", "S3", "S1", "S4", "S3", "S5", "S3", "S5", "S4",
-    "S6", "S7", "S6", "S7", "S6", "S7", "S6", "S7", "S6", "S7",
-    "S6", "S7", "S6", "S7", "S6", "S4",
+/// Ground-truth timeline for the reference audio (DJI 7-speaker meeting).
+/// Each entry: (speaker, start_seconds, end_seconds) — end is estimated from the next speaker's start.
+private let groundTruthTimeline: [(speaker: String, start: Double, end: Double)] = [
+    ("S1", 0, 46), ("S2", 46, 51), ("S3", 51, 54), ("S4", 54, 78),
+    ("S3", 78, 132), ("S3", 132, 199), ("S3", 199, 251), ("S3", 251, 337),
+    ("S3", 337, 409), ("S4", 409, 421), ("S3", 421, 422), ("S4", 422, 445),
+    ("S3", 445, 455), ("S4", 455, 478), ("S3", 478, 508), ("S4", 508, 541),
+    ("S3", 541, 544), ("S2", 544, 597), ("S3", 597, 625), ("S2", 625, 631),
+    ("S3", 631, 635), ("S4", 635, 653), ("S5", 653, 654), ("S4", 654, 657),
+    ("S5", 657, 697), ("S3", 697, 702), ("S5", 702, 706), ("S4", 706, 710),
+    ("S3", 710, 712), ("S5", 712, 756), ("S5", 756, 802), ("S5", 802, 836),
+    ("S4", 836, 838), ("S5", 838, 892), ("S5", 892, 945), ("S4", 945, 956),
+    ("S5", 956, 1018), ("S4", 1018, 1044), ("S5", 1044, 1046), ("S4", 1046, 1057),
+    ("S5", 1057, 1062), ("S3", 1062, 1063), ("S1", 1063, 1069), ("S3", 1069, 1070),
+    ("S1", 1070, 1073), ("S3", 1073, 1105), ("S5", 1105, 1133), ("S5", 1133, 1164),
+    ("S4", 1164, 1169), ("S5", 1169, 1180), ("S3", 1180, 1183), ("S1", 1183, 1186),
+    ("S4", 1186, 1197), ("S3", 1197, 1199), ("S5", 1199, 1227), ("S3", 1227, 1248),
+    ("S5", 1248, 1261), ("S4", 1261, 1276), ("S6", 1276, 1292), ("S6", 1292, 1334),
+    ("S6", 1334, 1369), ("S6", 1369, 1435), ("S6", 1435, 1502), ("S6", 1502, 1554),
+    ("S6", 1554, 1587), ("S7", 1587, 1601), ("S6", 1601, 1603), ("S7", 1603, 1614),
+    ("S6", 1614, 1633), ("S6", 1633, 1674), ("S6", 1674, 1722), ("S7", 1722, 1750),
+    ("S6", 1750, 1765), ("S7", 1765, 1767), ("S6", 1767, 1770), ("S7", 1770, 1773),
+    ("S6", 1773, 1782), ("S7", 1782, 1791), ("S6", 1791, 1804), ("S7", 1804, 1828),
+    ("S6", 1828, 1846), ("S4", 1846, 1860),
 ]
+
+/// Normalized ground truth speaker sequence (consecutive duplicates merged).
+private let groundTruthSequence: [String] = {
+    var seq: [String] = []
+    for (s, _, _) in groundTruthTimeline {
+        if seq.last != s { seq.append(s) }
+    }
+    return seq
+}()
 
 /// Normalize a speaker sequence by merging consecutive same-speaker runs.
 private func normalizeSeq(_ seq: [String]) -> [String] {
@@ -386,10 +409,10 @@ private func evaluateDiarization(_ segments: [SpeakerSegment]) -> (score: Double
         parts.append("segments=\(segCount) ✗")
     }
 
-    // 4. Sequence similarity (25 pts) — normalized Damerau-Levenshtein
+    // 4. Sequence similarity (25 pts) — temporal overlap-based mapping
     if !normSeq.isEmpty && !gtNorm.isEmpty {
-        // Map speaker labels to canonical IDs based on overlap order
-        let mappedSeq = remapSpeakersToCanonical(normSeq, reference: gtNorm)
+        // Map using temporal overlap with ground truth timeline
+        let mappedSeq = remapSpeakersByTimeline(segments, timeline: groundTruthTimeline)
         let minLen = min(mappedSeq.count, gtNorm.count)
         if minLen > 0 {
             let dist = damerauLevenshtein(Array(gtNorm.prefix(minLen)), Array(mappedSeq.prefix(minLen)))
@@ -402,61 +425,74 @@ private func evaluateDiarization(_ segments: [SpeakerSegment]) -> (score: Double
     return (score, parts.joined(separator: " | "))
 }
 
-/// Remap detected speaker IDs to best-matching canonical IDs from ground truth.
-/// Uses greedy assignment: for each detected speaker, find the most overlapping GT speaker.
-private func remapSpeakersToCanonical(_ detected: [String], reference: [String]) -> [String] {
-    let uniqueDetected = Array(Set(detected)).sorted()
-    let uniqueRef = Array(Set(reference)).sorted()
-    guard !uniqueDetected.isEmpty, !uniqueRef.isEmpty else { return detected }
-
-    // Build mapping: for each detected speaker, find the reference speaker with most co-occurrences
-    var mapping: [String: String] = [:]
-    for d in uniqueDetected {
-        let dIndices = detected.enumerated().filter { $0.element == d }.map { $0.offset }
-        var bestRef = uniqueRef[0]
-        var bestCount = 0
-        for r in uniqueRef {
-            let count = dIndices.filter { idx in
-                idx < reference.count && reference[idx] == r
-            }.count
-            if count > bestCount {
-                bestCount = count
-                bestRef = r
-            }
-        }
-        mapping[d] = bestRef
-    }
-    // Handle conflicts: if multiple detected map to same ref, keep the one with most matches
-    var usedRefs = Set<String>()
-    var finalMapping: [String: String] = [:]
-    for d in uniqueDetected.sorted(by: { a, b in
-        let aCount = detected.filter { $0 == a }.count
-        let bCount = detected.filter { $0 == b }.count
-        return aCount > bCount
-    }) {
-        let mapped = mapping[d]!
-        if !usedRefs.contains(mapped) {
-            finalMapping[d] = mapped
-            usedRefs.insert(mapped)
+/// Map detected speaker segments to canonical ground-truth labels using temporal overlap.
+/// For each detected segment, finds the ground-truth segment that overlaps it most by time,
+/// then maps the detected speaker ID to that ground-truth speaker.
+/// This is far more accurate than position-based co-occurrence mapping.
+private func remapSpeakersByTimeline(_ segments: [SpeakerSegment], timeline: [(speaker: String, start: Double, end: Double)]) -> [String] {
+    // Build a normalized detected sequence with start times
+    var normSegments: [(speaker: String, start: Double, end: Double)] = []
+    for seg in segments {
+        if let last = normSegments.last, last.speaker == seg.speakerId {
+            // Extend the last segment's end time
+            normSegments[normSegments.count - 1].end = seg.end
         } else {
-            // Find the best unused reference
-            let dIndices = detected.enumerated().filter { $0.element == d }.map { $0.offset }
-            var bestRef = uniqueRef.first { !usedRefs.contains($0) } ?? mapped
-            var bestCount = 0
-            for r in uniqueRef where !usedRefs.contains(r) {
-                let count = dIndices.filter { idx in
-                    idx < reference.count && reference[idx] == r
-                }.count
-                if count > bestCount {
-                    bestCount = count
-                    bestRef = r
-                }
-            }
-            finalMapping[d] = bestRef
-            usedRefs.insert(bestRef)
+            normSegments.append((speaker: seg.speakerId, start: seg.start, end: seg.end))
         }
     }
-    return detected.map { finalMapping[$0] ?? $0 }
+
+    guard !normSegments.isEmpty, !timeline.isEmpty else { return [] }
+
+    // For each unique detected speaker, find the GT speaker that has the most temporal overlap
+    let uniqueDetected = Array(Set(normSegments.map { $0.speaker })).sorted()
+    let uniqueRef = Array(Set(timeline.map { $0.speaker })).sorted()
+
+    // Compute overlap between each detected speaker and each GT speaker
+    var overlapMap: [String: [String: Double]] = [:]
+    for d in uniqueDetected {
+        overlapMap[d] = [:]
+        for r in uniqueRef {
+            overlapMap[d]![r] = 0
+        }
+    }
+
+    for dSeg in normSegments {
+        for gtSeg in timeline {
+            // Compute temporal overlap
+            let overlapStart = max(dSeg.start, gtSeg.start)
+            let overlapEnd = min(dSeg.end, gtSeg.end)
+            let overlap = max(0, overlapEnd - overlapStart)
+            if overlap > 0 {
+                overlapMap[dSeg.speaker]![gtSeg.speaker] = (overlapMap[dSeg.speaker]![gtSeg.speaker] ?? 0) + overlap
+            }
+        }
+    }
+
+    // Greedy assignment: assign detected speakers to GT speakers with most overlap
+    var mapping: [String: String] = [:]
+    var usedRefs = Set<String>()
+
+    // Sort detected by total overlap (most confident first)
+    let sortedDetected = uniqueDetected.sorted { a, b in
+        let aTotal = overlapMap[a]?.values.reduce(0, +) ?? 0
+        let bTotal = overlapMap[b]?.values.reduce(0, +) ?? 0
+        return aTotal > bTotal
+    }
+
+    for d in sortedDetected {
+        let candidates = overlapMap[d]!.filter { !usedRefs.contains($0.key) }
+        if let best = candidates.max(by: { $0.value < $1.value }), best.value > 0 {
+            mapping[d] = best.key
+            usedRefs.insert(best.key)
+        } else {
+            // Assign to any unused GT speaker
+            let remaining = uniqueRef.filter { !usedRefs.contains($0) }
+            mapping[d] = remaining.first ?? uniqueRef[0]
+            if let r = remaining.first { usedRefs.insert(r) }
+        }
+    }
+
+    return normSegments.map { mapping[$0.speaker] ?? $0.speaker }
 }
 
 /// Run AutoResearch-style parameter tuning for FluidAudio diarization.
