@@ -53,7 +53,46 @@ private func labelForSpeaker(_ speakerId: String) -> String {
 /// - Parameter fileURL: URL of the audio file to diarize
 /// - Returns: Array of SpeakerSegment, or empty array if diarization fails
 func runDiarization(fileURL: URL) async throws -> [SpeakerSegment] {
-    let config = OfflineDiarizerConfig()
+    // Tuned for 2-speaker conversation: lower threshold for cleaner separation,
+    // shorter min durations to capture rapid turn-taking, enable zero-vote
+    // re-embedding to fix unassigned segments.
+    let segConfig = OfflineDiarizerConfig.Segmentation(
+        windowDurationSeconds: 10.0,
+        sampleRate: 16_000,
+        minDurationOn: 0.2,
+        minDurationOff: 0.3,
+        stepRatio: 0.2,
+        speechOnsetThreshold: 0.5,
+        speechOffsetThreshold: 0.5
+    )
+    let embConfig = OfflineDiarizerConfig.Embedding(
+        batchSize: 32,
+        excludeOverlap: true,
+        minSegmentDurationSeconds: 0.5,
+        skipStrategy: .none
+    )
+    let clusConfig = OfflineDiarizerConfig.Clustering(
+        threshold: 0.5,
+        warmStartFa: 0.07,
+        warmStartFb: 0.8,
+        numSpeakers: 2
+    )
+    let ppConfig = OfflineDiarizerConfig.PostProcessing(
+        minGapDurationSeconds: 0.05,
+        exclusiveSegments: true
+    )
+    let zvConfig = OfflineDiarizerConfig.ZeroVoteReembed(
+        enabled: true,
+        minDurationSeconds: 0.4
+    )
+    let config = OfflineDiarizerConfig(
+        segmentation: segConfig,
+        embedding: embConfig,
+        clustering: clusConfig,
+        postProcessing: ppConfig,
+        zeroVoteReembed: zvConfig,
+        exposeChunkEmbeddings: false
+    )
     let manager = OfflineDiarizerManager(config: config)
 
     // Prepare models (downloads on first run, caches afterward)
