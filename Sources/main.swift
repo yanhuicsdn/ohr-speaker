@@ -142,6 +142,8 @@ while !args.isEmpty {
         noColorFlag = true
     case "--speakers":
         enableSpeakerDiarization = true
+    case "--tune":
+        mode = "tune"
 
     // Language
     case "-l", "--language":
@@ -231,6 +233,20 @@ case "serve":
     } catch {
         printError("Server failed: \(error.localizedDescription)")
         exit(exitRuntimeError)
+    }
+
+case "tune":
+    let audioPath = filePaths.first
+    guard let audioPath else {
+        printError("--tune requires an audio file path")
+        exit(exitUsageError)
+    }
+    do {
+        try await tuneDiarization(fileURL: URL(fileURLWithPath: audioPath))
+    } catch {
+        let classified = OhrError.classify(error)
+        printError("Tuning failed: \(classified.cliLabel) \(classified.openAIMessage)")
+        exit(exitCode(for: classified))
     }
 
 default:

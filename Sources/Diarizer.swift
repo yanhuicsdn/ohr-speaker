@@ -48,12 +48,56 @@ private func labelForSpeaker(_ speakerId: String) -> String {
 
 // MARK: - Diarization
 
-/// Run speaker diarization on an audio file using FluidAudio's offline pipeline.
-/// Returns a list of speaker segments sorted by time.
-/// - Parameter fileURL: URL of the audio file to diarize
-/// - Returns: Array of SpeakerSegment, or empty array if diarization fails
+/// Default diarization config — auto-tuned for multi-speaker conversations.
+func defaultDiarizerConfig() -> OfflineDiarizerConfig {
+    OfflineDiarizerConfig(
+        segmentation: .init(
+            windowDurationSeconds: 10.0,
+            sampleRate: 16_000,
+            minDurationOn: 0.0,
+            minDurationOff: 0.0,
+            stepRatio: 0.3,
+            speechOnsetThreshold: Float(0.5),
+            speechOffsetThreshold: Float(0.5)
+        ),
+        embedding: .init(
+            batchSize: 32,
+            excludeOverlap: true,
+            minSegmentDurationSeconds: 1.0,
+            skipStrategy: .none
+        ),
+        clustering: .init(
+            threshold: 0.7,
+            warmStartFa: 0.07,
+            warmStartFb: 0.8
+        ),
+        vbx: .init(
+            maxIterations: 60,
+            convergenceTolerance: 1e-5
+        ),
+        postProcessing: .init(
+            minGapDurationSeconds: 0.1,
+            exclusiveSegments: true
+        ),
+        zeroVoteReembed: .init(
+            enabled: true,
+            minDurationSeconds: 0.4
+        ),
+        exposeChunkEmbeddings: false
+    )
+}
+
 func runDiarization(fileURL: URL) async throws -> [SpeakerSegment] {
-    let config = OfflineDiarizerConfig()
+    try await runDiarization(fileURL: fileURL, config: defaultDiarizerConfig())
+}
+
+/// Run speaker diarization on an audio file using FluidAudio's offline pipeline
+/// with the given config.
+/// - Parameters:
+///   - fileURL: URL of the audio file to diarize
+///   - config: OfflineDiarizerConfig to use
+/// - Returns: Array of SpeakerSegment, or empty array if diarization fails
+func runDiarization(fileURL: URL, config: OfflineDiarizerConfig) async throws -> [SpeakerSegment] {
     let manager = OfflineDiarizerManager(config: config)
 
     // Prepare models (downloads on first run, caches afterward)
@@ -235,4 +279,321 @@ private func bestSpeaker(
 
     // Fallback: assign to nearest speaker if within 5 seconds
     return bestDistance <= 5.0 ? nearestSpeaker : nil
+}
+
+// MARK: - Auto-Tuning
+
+/// Ground-truth speaker sequence for the reference audio file.
+/// Obtained from the manually corrected transcript of the DJI meeting audio (7 speakers).
+private let groundTruthSequence: [String] = [
+    "S1", "S2", "S3", "S4", "S3", "S4", "S3", "S4", "S3", "S4",
+    "S3", "S4", "S3", "S2", "S3", "S2", "S3", "S4", "S5", "S4",
+    "S5", "S3", "S5", "S4", "S3", "S5", "S4", "S5", "S4", "S5",
+    "S4", "S5", "S4", "S5", "S3", "S1", "S3", "S1", "S3", "S5",
+    "S4", "S5", "S3", "S1", "S4", "S3", "S5", "S3", "S5", "S4",
+    "S6", "S7", "S6", "S7", "S6", "S7", "S6", "S7", "S6", "S7",
+    "S6", "S7", "S6", "S7", "S6", "S4",
+]
+
+/// Normalize a speaker sequence by merging consecutive same-speaker runs.
+private func normalizeSeq(_ seq: [String]) -> [String] {
+    guard !seq.isEmpty else { return [] }
+    var result = [seq[0]]
+    for s in seq.dropFirst() {
+        if s != result.last! { result.append(s) }
+    }
+    return result
+}
+
+/// Compute Damerau-Levenshtein distance between two sequences.
+private func damerauLevenshtein(_ a: [String], _ b: [String]) -> Int {
+    let n = a.count, m = b.count
+    guard n > 0 else { return m }
+    guard m > 0 else { return n }
+    var d = [[Int]](repeating: [Int](repeating: 0, count: m + 1), count: n + 1)
+    for i in 0...n { d[i][0] = i }
+    for j in 0...m { d[0][j] = j }
+    for i in 1...n {
+        for j in 1...m {
+            let cost = a[i-1] == b[j-1] ? 0 : 1
+            d[i][j] = min(d[i-1][j] + 1, d[i][j-1] + 1, d[i-1][j-1] + cost)
+            if i > 1 && j > 1 && a[i-1] == b[j-2] && a[i-2] == b[j-1] {
+                d[i][j] = min(d[i][j], d[i-2][j-2] + cost)
+            }
+        }
+    }
+    return d[n][m]
+}
+
+/// Evaluate diarization quality against ground truth.
+/// Returns a score 0-100. Supports multi-speaker evaluation.
+private func evaluateDiarization(_ segments: [SpeakerSegment]) -> (score: Double, details: String) {
+    var score = 0.0
+    var parts: [String] = []
+
+    let speakers = Set(segments.map { $0.speakerId })
+    let speakerCount = speakers.count
+    let gtNorm = normalizeSeq(groundTruthSequence)
+    let gtSpeakers = Set(groundTruthSequence)
+    let gtSpeakerCount = gtSpeakers.count
+
+    // 1. Speaker count (35 pts) — proportional to how close to ground truth
+    let countDiff = abs(speakerCount - gtSpeakerCount)
+    if countDiff == 0 {
+        score += 35
+        parts.append("speakers=\(speakerCount) ✓")
+    } else if countDiff <= 1 {
+        score += 25
+        parts.append("speakers=\(speakerCount) ≈")
+    } else if countDiff <= 2 {
+        score += 15
+        parts.append("speakers=\(speakerCount) ⚠")
+    } else {
+        parts.append("speakers=\(speakerCount) ✗")
+    }
+
+    // 2. Speaker balance (20 pts) — check all speakers, penalize if one dominates
+    if speakerCount >= 2 {
+        let totalTime = segments.reduce(0.0) { $0 + ($1.end - $1.start) }
+        guard totalTime > 0 else { return (0, "no speech") }
+        let speakerTimes = Dictionary(grouping: segments, by: { $0.speakerId })
+            .mapValues { segs in segs.reduce(0.0) { $0 + ($1.end - $1.start) } }
+        let maxShare = speakerTimes.values.max()! / totalTime
+        // Max speaker should not exceed 60% of total time for balanced conversation
+        if maxShare <= 0.6 {
+            score += 20
+            parts.append("balance ✓")
+        } else if maxShare <= 0.8 {
+            score += 10
+            parts.append("balance ⚠")
+        } else {
+            parts.append("balance ✗")
+        }
+    }
+
+    // 3. Segment count vs ground truth (20 pts)
+    let seq = segments.map { $0.speakerId }
+    let normSeq = normalizeSeq(seq)
+    let segCount = normSeq.count
+    let gtCount = gtNorm.count
+    if segCount >= gtCount * 3 / 10 && segCount <= gtCount * 15 / 10 {
+        score += 20
+        parts.append("segments=\(segCount) ✓")
+    } else if segCount >= gtCount * 2 / 10 && segCount <= gtCount * 2 {
+        score += 10
+        parts.append("segments=\(segCount) ⚠")
+    } else {
+        parts.append("segments=\(segCount) ✗")
+    }
+
+    // 4. Sequence similarity (25 pts) — normalized Damerau-Levenshtein
+    if !normSeq.isEmpty && !gtNorm.isEmpty {
+        // Map speaker labels to canonical IDs based on overlap order
+        let mappedSeq = remapSpeakersToCanonical(normSeq, reference: gtNorm)
+        let minLen = min(mappedSeq.count, gtNorm.count)
+        if minLen > 0 {
+            let dist = damerauLevenshtein(Array(gtNorm.prefix(minLen)), Array(mappedSeq.prefix(minLen)))
+            let similarity = 1.0 - Double(dist) / Double(minLen)
+            score += similarity * 25
+            parts.append("sim=\(String(format: "%.0f", similarity * 100))%")
+        }
+    }
+
+    return (score, parts.joined(separator: " | "))
+}
+
+/// Remap detected speaker IDs to best-matching canonical IDs from ground truth.
+/// Uses greedy assignment: for each detected speaker, find the most overlapping GT speaker.
+private func remapSpeakersToCanonical(_ detected: [String], reference: [String]) -> [String] {
+    let uniqueDetected = Array(Set(detected)).sorted()
+    let uniqueRef = Array(Set(reference)).sorted()
+    guard !uniqueDetected.isEmpty, !uniqueRef.isEmpty else { return detected }
+
+    // Build mapping: for each detected speaker, find the reference speaker with most co-occurrences
+    var mapping: [String: String] = [:]
+    for d in uniqueDetected {
+        let dIndices = detected.enumerated().filter { $0.element == d }.map { $0.offset }
+        var bestRef = uniqueRef[0]
+        var bestCount = 0
+        for r in uniqueRef {
+            let count = dIndices.filter { idx in
+                idx < reference.count && reference[idx] == r
+            }.count
+            if count > bestCount {
+                bestCount = count
+                bestRef = r
+            }
+        }
+        mapping[d] = bestRef
+    }
+    // Handle conflicts: if multiple detected map to same ref, keep the one with most matches
+    var usedRefs = Set<String>()
+    var finalMapping: [String: String] = [:]
+    for d in uniqueDetected.sorted(by: { a, b in
+        let aCount = detected.filter { $0 == a }.count
+        let bCount = detected.filter { $0 == b }.count
+        return aCount > bCount
+    }) {
+        let mapped = mapping[d]!
+        if !usedRefs.contains(mapped) {
+            finalMapping[d] = mapped
+            usedRefs.insert(mapped)
+        } else {
+            // Find the best unused reference
+            let dIndices = detected.enumerated().filter { $0.element == d }.map { $0.offset }
+            var bestRef = uniqueRef.first { !usedRefs.contains($0) } ?? mapped
+            var bestCount = 0
+            for r in uniqueRef where !usedRefs.contains(r) {
+                let count = dIndices.filter { idx in
+                    idx < reference.count && reference[idx] == r
+                }.count
+                if count > bestCount {
+                    bestCount = count
+                    bestRef = r
+                }
+            }
+            finalMapping[d] = bestRef
+            usedRefs.insert(bestRef)
+        }
+    }
+    return detected.map { finalMapping[$0] ?? $0 }
+}
+
+/// Run AutoResearch-style parameter tuning for FluidAudio diarization.
+/// Iterates through parameter combinations, evaluates each, and reports the best config.
+public func tuneDiarization(fileURL: URL) async throws {
+    print(String(repeating: "=", count: 60))
+    print("AutoResearch: FluidAudio Diarization Parameter Tuner")
+    print(String(repeating: "=", count: 60))
+    print()
+    print("Audio: \(fileURL.lastPathComponent)")
+    print("Ground truth: \(groundTruthSequence.count) speaker segments, \(normalizeSeq(groundTruthSequence).count) normalized turns")
+    print()
+
+    // Parameter search space
+    let clusteringThresholds: [Double] = [0.35, 0.4, 0.45, 0.5, 0.55, 0.6, 0.65, 0.7]
+    let minSegmentDurations: [Double] = [0.3, 0.5, 0.7, 1.0]
+    let minDurationOnValues: [Double] = [0.0, 0.1, 0.2, 0.3]
+    let minDurationOffValues: [Double] = [0.0, 0.1, 0.2, 0.3]
+    let speechOnsetValues: [Double] = [0.4, 0.5, 0.6]
+    let speechOffsetValues: [Double] = [0.4, 0.5, 0.6]
+    let stepRatios: [Double] = [0.15, 0.2, 0.3]
+    let minGapValues: [Double] = [0.02, 0.05, 0.1]
+    let warmStartFaValues: [Double] = [0.04, 0.07, 0.1]
+    let warmStartFbValues: [Double] = [0.7, 0.8, 0.9]
+    let vbxIterations: [Double] = [20, 40, 60, 80, 100]
+    let vbxTolerances: [Double] = [1e-4, 5e-5, 1e-5, 5e-6]
+
+    // Baseline config (FluidAudio defaults)
+    var bestScore = 0.0
+    var bestParams: [String: Any] = [:]
+    var bestSegments: [SpeakerSegment] = []
+    var trialCount = 0
+
+    // Phase 1: Baseline
+    print("Phase 1: Baseline (FluidAudio defaults)")
+    var baselineCfg = OfflineDiarizerConfig()
+    baselineCfg.zeroVoteReembed = .init(enabled: true, minDurationSeconds: 0.4)
+    let baselineSegments = try await runDiarization(fileURL: fileURL, config: baselineCfg)
+    let baselineResult = evaluateDiarization(baselineSegments)
+    bestScore = baselineResult.score
+    bestParams = ["threshold": 0.6, "minSeg": 1.0, "minOn": 0.0, "minOff": 0.0,
+                   "onset": 0.5, "offset": 0.5, "stepRatio": 0.2, "minGap": 0.1, "Fa": 0.07, "Fb": 0.8,
+                   "vbxIter": 20.0, "vbxTol": 1e-4]
+    bestSegments = baselineSegments
+    print("  Baseline: score=\(String(format: "%.1f", baselineResult.score)) | \(baselineResult.details)")
+
+    // Phase 2: One-at-a-time sweep — vary each parameter while keeping others at best
+    print()
+    print("Phase 2: One-at-a-time sweep")
+    print("  (onset/offset sweeps omitted — they're interdependent with validation constraints)")
+
+    let paramRuns: [(name: String, values: [Double], apply: (inout OfflineDiarizerConfig, Double) -> Void)] = [
+        ("threshold", clusteringThresholds, { c, v in c.clustering.threshold = v }),
+        ("minSeg", minSegmentDurations, { c, v in c.embedding.minSegmentDurationSeconds = v }),
+        ("minOn", minDurationOnValues, { c, v in c.segmentation.minDurationOn = v }),
+        ("minOff", minDurationOffValues, { c, v in c.segmentation.minDurationOff = v }),
+        ("stepRatio", stepRatios, { c, v in c.segmentation.stepRatio = v }),
+        ("minGap", minGapValues, { c, v in c.postProcessing.minGapDurationSeconds = v }),
+        ("Fa", warmStartFaValues, { c, v in c.clustering.warmStartFa = v }),
+        ("Fb", warmStartFbValues, { c, v in c.clustering.warmStartFb = v }),
+        ("vbxIter", vbxIterations, { c, v in c.vbx.maxIterations = Int(v) }),
+        ("vbxTol", vbxTolerances, { c, v in c.vbx.convergenceTolerance = v }),
+    ]
+
+    for param in paramRuns {
+        var paramBestScore = bestScore
+        var paramBestValue: Any = bestParams[param.name]!
+
+        for val in param.values {
+            // Build config from best params
+            var cfg = OfflineDiarizerConfig()
+            cfg.clustering.threshold = bestParams["threshold"] as! Double
+            cfg.embedding.minSegmentDurationSeconds = bestParams["minSeg"] as! Double
+            cfg.segmentation.minDurationOn = bestParams["minOn"] as! Double
+            cfg.segmentation.minDurationOff = bestParams["minOff"] as! Double
+            cfg.segmentation.speechOnsetThreshold = Float(bestParams["onset"] as! Double)
+            cfg.segmentation.speechOffsetThreshold = Float(bestParams["offset"] as! Double)
+            cfg.segmentation.stepRatio = bestParams["stepRatio"] as! Double
+            cfg.postProcessing.minGapDurationSeconds = bestParams["minGap"] as! Double
+            cfg.clustering.warmStartFa = bestParams["Fa"] as! Double
+            cfg.clustering.warmStartFb = bestParams["Fb"] as! Double
+            cfg.zeroVoteReembed = .init(enabled: true, minDurationSeconds: 0.4)
+            cfg.vbx.maxIterations = Int(bestParams["vbxIter"] as! Double)
+            cfg.vbx.convergenceTolerance = bestParams["vbxTol"] as! Double
+
+            // Apply the current parameter value
+            param.apply(&cfg, val)
+
+            let segments = try await runDiarization(fileURL: fileURL, config: cfg)
+            trialCount += 1
+            let result = evaluateDiarization(segments)
+
+            print("  \(param.name)=\(val): score=\(String(format: "%.1f", result.score)) | \(result.details)")
+
+            if result.score > paramBestScore {
+                paramBestScore = result.score
+                paramBestValue = val
+            }
+        }
+
+        let currentBest = bestParams[param.name] as! Double
+        if let pv = paramBestValue as? Double, abs(pv - currentBest) > 1e-6 {
+            print("  >>> \(param.name) improved: \(currentBest) → \(pv)")
+            bestParams[param.name] = pv
+            bestScore = paramBestScore
+        }
+    }
+
+    // Phase 3: Verify with best config
+    print()
+    print(String(repeating: "=", count: 60))
+    print("RESULTS")
+    print(String(repeating: "=", count: 60))
+    print()
+    print("Trials: \(trialCount + 1)")
+    print("Best score: \(String(format: "%.1f", bestScore))/100")
+    print()
+    print("Best parameters:")
+    print("  clustering.threshold:            \(bestParams["threshold"]!)")
+    print("  embedding.minSegmentDuration:    \(bestParams["minSeg"]!)")
+    print("  segmentation.minDurationOn:      \(bestParams["minOn"]!)")
+    print("  segmentation.minDurationOff:     \(bestParams["minOff"]!)")
+    print("  segmentation.speechOnsetThreshold: \(bestParams["onset"]!)")
+    print("  segmentation.speechOffsetThreshold: \(bestParams["offset"]!)")
+    print("  segmentation.stepRatio:          \(bestParams["stepRatio"]!)")
+    print("  postProcessing.minGap:           \(bestParams["minGap"]!)")
+    print("  clustering.warmStartFa:          \(bestParams["Fa"]!)")
+    print("  clustering.warmStartFb:          \(bestParams["Fb"]!)")
+    print("  vbx.maxIterations:               \(bestParams["vbxIter"]!)")
+    print("  vbx.convergenceTolerance:        \(bestParams["vbxTol"]!)")
+    print()
+    print("Details: \(evaluateDiarization(bestSegments).details)")
+    print()
+
+    // Print speaker sequence
+    let seq = bestSegments.map { $0.speakerId }
+    let normSeq = normalizeSeq(seq)
+    print("Speaker sequence (\(normSeq.count) turns):")
+    print(normSeq.joined(separator: " → "))
 }
