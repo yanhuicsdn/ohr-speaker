@@ -30,14 +30,23 @@ func transcribeFileCommand(path: String, language: String?, timestamps: Bool) as
             }
         } else if result.hasSpeakerLabels {
             var currentSpeaker: String? = nil
+            var speakerTexts: [String] = []
             for segment in result.segments {
                 if segment.speaker != currentSpeaker {
-                    currentSpeaker = segment.speaker
-                    if let sp = currentSpeaker {
-                        print(styled("\n【\(sp)】", .cyan, .bold))
+                    // Flush previous speaker's text (skip on first iteration)
+                    if let sp = currentSpeaker, !speakerTexts.isEmpty {
+                        print(styled("【\(sp)】", .cyan, .bold))
+                        print(speakerTexts.joined())
+                        speakerTexts.removeAll()
                     }
+                    currentSpeaker = segment.speaker
                 }
-                print(segment.text)
+                speakerTexts.append(segment.text)
+            }
+            // Flush last speaker
+            if !speakerTexts.isEmpty, let sp = currentSpeaker {
+                print(styled("【\(sp)】", .cyan, .bold))
+                print(speakerTexts.joined())
             }
         } else {
             print(result.text)
