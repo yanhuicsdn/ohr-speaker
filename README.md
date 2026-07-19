@@ -1,103 +1,105 @@
 # ohr-speaker 🔊
 
-> 基于 Apple Intelligence 的本地语音转文字工具，支持 **说话人识别（声纹分割）**
+> On-device speech-to-text with **speaker diarization**, powered by Apple Intelligence
 
-ohr-speaker 是 [ohr](https://github.com/Arthur-Ficial/ohr) 的增强分支，在原有 Apple SpeechAnalyzer 转录引擎的基础上，集成了 [FluidAudio](https://github.com/FluidInference/FluidAudio) 的离线说话人分割（Speaker Diarization）功能。
+[**中文版**](README_ZH.md) | English
 
-**100% 本地运行，无需联网，无需 API 密钥，数据不出设备。**
+ohr-speaker is an enhanced fork of [ohr](https://github.com/Arthur-Ficial/ohr) that integrates [FluidAudio](https://github.com/FluidInference/FluidAudio) offline speaker diarization on top of the original Apple SpeechAnalyzer transcription engine.
+
+**100% on-device. No cloud. No API keys. Your data never leaves your machine.**
 
 ---
 
-## 特性
+## Features
 
-- 🎤 **Apple Intelligence 转录** — 使用 macOS SpeechAnalyzer，毫秒级响应
-- 🗣️ **说话人识别** — 自动检测并区分不同说话人（`--speakers` 标志）
-- 📝 **多种输出格式** — 纯文本、JSON、SRT 字幕、VTT 字幕
-- 🎙️ **麦克风实时转录** — 支持 `--listen` 模式
-- 🖥️ **OpenAI 兼容服务器** — 支持 `--serve` 模式，兼容 OpenAI Whisper API
-- 📦 **多格式支持** — m4a, wav, mp3, mp4, caf, aiff, flac
-- 🔒 **隐私优先** — 所有处理在本地完成，数据不上传云端
+- 🎤 **Apple Intelligence Transcription** — Powered by macOS SpeechAnalyzer, millisecond latency
+- 🗣️ **Speaker Diarization** — Automatically detects and labels different speakers (`--speakers` flag)
+- 📝 **Multiple Output Formats** — Plain text, JSON, SRT subtitles, VTT subtitles
+- 🎙️ **Live Microphone Transcription** — Real-time `--listen` mode
+- 🖥️ **OpenAI-Compatible Server** — `--serve` mode, compatible with OpenAI Whisper API
+- 📦 **Multi-format Support** — m4a, wav, mp3, mp4, caf, aiff, flac
+- 🔒 **Privacy First** — All processing is local, no data uploaded
 
-## 安装
+## Installation
 
-### 前提条件
+### Prerequisites
 
-- macOS 26+（Apple Silicon）
-- Xcode 26.6+ 或 Xcode-beta 27+
-- 约 700 MB 磁盘空间（首次运行自动下载 FluidAudio 模型）
+- macOS 26+ (Apple Silicon)
+- Xcode 26.6+ or Xcode-beta 27+
+- ~700 MB disk space (first run auto-downloads FluidAudio models)
 
-### 从源码编译
+### Build from Source
 
 ```bash
 git clone https://github.com/yanhuicsdn/ohr-speaker.git
 cd ohr-speaker
 
-# 使用 Xcode-beta 工具链（macOS 27+）
+# Using Xcode-beta toolchain (macOS 27+)
 DEVELOPER_DIR="/Applications/Xcode-beta.app/Contents/Developer" swift build -c release
 
-# 或者使用 Xcode 正式版（macOS 26+）
+# Using Xcode stable (macOS 26+)
 swift build -c release
 
-# 将编译好的二进制复制到 PATH 中
+# Copy the binary to your PATH
 cp .build/release/ohr /usr/local/bin/ohr-speaker
 ```
 
-### 直接下载
+### Download Binary
 
-从 [Releases](https://github.com/yanhuicsdn/ohr-speaker/releases) 页面下载预编译二进制文件。
+Download the pre-built binary from the [Releases](https://github.com/yanhuicsdn/ohr-speaker/releases) page.
 
-## 使用
+## Usage
 
-### 基础转录
-
-```bash
-ohr-speaker 音频文件.wav
-```
-
-### 带说话人识别
+### Basic Transcription
 
 ```bash
-ohr-speaker --speakers 音频文件.wav
+ohr-speaker audio.wav
 ```
 
-输出示例：
+### With Speaker Diarization
+
+```bash
+ohr-speaker --speakers audio.wav
+```
+
+Sample output:
 
 ```
 【S1】
-都会有一个平台管理一般就有个用户中心...
+There is usually a platform management layer with a user center...
 
 【S2】
-一个全的给个全的让用这样东西对他这个就比较清晰...
+Give them the full version so they can use it...
 
 【S1】
-对，就是他们省业务层面对这个权限的隔离是要求...
+Yes, provincial business layers have isolation requirements for permissions...
 ```
 
-### 输出为 SRT 字幕
+### Output as SRT Subtitles
 
 ```bash
-ohr-speaker --speakers -o srt 音频文件.wav > 字幕.srt
+ohr-speaker --speakers -o srt audio.wav > subtitles.srt
 ```
 
-### 输出为 JSON
+### Output as JSON
 
 ```bash
-ohr-speaker --speakers -o json 音频文件.wav
+ohr-speaker --speakers -o json audio.wav
 ```
 
-### 麦克风实时转录
+### Live Microphone Transcription
 
 ```bash
 ohr-speaker --listen --speakers
 ```
 
-### 启动 OpenAI 兼容服务器
+### Start OpenAI-Compatible Server
 
 ```bash
 ohr-speaker --serve --port 11434
 ```
 
-然后可以用任何 OpenAI Whisper 客户端调用：
+Then call from any OpenAI Whisper client:
 
 ```bash
 curl http://localhost:11434/v1/audio/transcriptions \
@@ -106,7 +108,7 @@ curl http://localhost:11434/v1/audio/transcriptions \
   -F "diarize=true"
 ```
 
-### 完整选项
+### Complete Options
 
 ```
 USAGE:
@@ -130,38 +132,38 @@ OPTIONS:
   --no-color                   Disable ANSI colors
 ```
 
-## 与原始 ohr 的区别
+## Differences from Upstream ohr
 
-| 特性 | ohr | ohr-speaker |
-|------|-----|-------------|
-| 说话人识别 | ❌ | ✅ `--speakers` |
-| 转录引擎 | Apple SpeechAnalyzer | Apple SpeechAnalyzer |
-| 声纹引擎 | — | FluidAudio OfflineDiarizer |
-| 模型下载 | 0 MB | ~700 MB（一次性） |
-| 输出格式 | plain/json/srt/vtt | plain/json/srt/vtt + 说话人标签 |
-| 服务器模式 | ✅ | ✅（支持 `diarize` 参数） |
+| Feature | ohr | ohr-speaker |
+|---------|-----|-------------|
+| Speaker Diarization | ❌ | ✅ `--speakers` |
+| Transcription Engine | Apple SpeechAnalyzer | Apple SpeechAnalyzer |
+| Diarization Engine | — | FluidAudio OfflineDiarizer |
+| Model Download | 0 MB | ~700 MB (one-time) |
+| Output Formats | plain/json/srt/vtt | plain/json/srt/vtt + speaker labels |
+| Server Mode | ✅ | ✅ (supports `diarize` parameter) |
 
-## 性能
+## Performance
 
-| 音频时长 | 纯转录 | 说话人识别（额外） |
-|---------|--------|-------------------|
-| 1 分钟 | ~1s | ~1s |
-| 10 分钟 | ~3s | ~2s |
-| 31 分钟 | ~10s | ~5s |
-| 1 小时 | ~20s | ~10s |
+| Audio Duration | Transcription Only | Additional Diarization |
+|---------------|-------------------|----------------------|
+| 1 min | ~1s | ~1s |
+| 10 min | ~3s | ~2s |
+| 31 min | ~10s | ~5s |
+| 1 hour | ~20s | ~10s |
 
-## 技术原理
+## How It Works
 
-1. **转录**：使用 Apple 的 `SpeechAnalyzer` + `SpeechTranscriber` 框架，将音频转为带时间戳的文本段
-2. **声纹**：使用 FluidAudio 的 `OfflineDiarizerManager`，对音频进行说话人分割
-3. **对齐**：通过时间重叠最大化算法，将转录段与说话人段对齐，为每个文本段分配说话人标签
+1. **Transcription**: Uses Apple's `SpeechAnalyzer` + `SpeechTranscriber` framework to convert audio into timestamped text segments
+2. **Diarization**: Uses FluidAudio's `OfflineDiarizerManager` to perform speaker segmentation on the audio
+3. **Alignment**: Uses a time-overlap-maximization algorithm to align transcription segments with speaker segments, assigning each text segment a speaker label
 
-## 致谢
+## Credits
 
-- [Arthur-Ficial/ohr](https://github.com/Arthur-Ficial/ohr) — 原始 ohr 项目
-- [FluidInference/FluidAudio](https://github.com/FluidInference/FluidAudio) — FluidAudio 声纹引擎
-- Apple Speech 框架 — macOS 内置语音识别能力
+- [Arthur-Ficial/ohr](https://github.com/Arthur-Ficial/ohr) — The original ohr project
+- [FluidInference/FluidAudio](https://github.com/FluidInference/FluidAudio) — FluidAudio diarization engine
+- Apple Speech Framework — macOS built-in speech recognition capabilities
 
-## 许可
+## License
 
 [MIT](LICENSE)
