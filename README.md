@@ -1,399 +1,167 @@
-# ohr
+# ohr-speaker 🔊
 
-[![Version 0.1.6](https://img.shields.io/badge/version-0.1.6-blue)](https://github.com/Arthur-Ficial/ohr)
-[![Swift 6.3+](https://img.shields.io/badge/Swift-6.3%2B-F05138?logo=swift&logoColor=white)](https://swift.org)
-[![macOS 26+](https://img.shields.io/badge/macOS-26%2B-000000?logo=apple&logoColor=white)](https://developer.apple.com/macos/)
-[![No Xcode Required](https://img.shields.io/badge/Xcode-not%20required-orange)](https://developer.apple.com/xcode/resources/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![100% On-Device](https://img.shields.io/badge/inference-100%25%20on--device-green)](https://developer.apple.com/documentation/speech)
+> 基于 Apple Intelligence 的本地语音转文字工具，支持 **说话人识别（声纹分割）**
 
-On-device speech-to-text on your Mac. Transcribe audio files, generate subtitles, stream from the microphone — all locally, no cloud.
+ohr-speaker 是 [ohr](https://github.com/Arthur-Ficial/ohr) 的增强分支，在原有 Apple SpeechAnalyzer 转录引擎的基础上，集成了 [FluidAudio](https://github.com/FluidInference/FluidAudio) 的离线说话人分割（Speaker Diarization）功能。
 
-No API keys. No network. No subscriptions. The speech recognition is already on your computer — ohr lets you use it.
+**100% 本地运行，无需联网，无需 API 密钥，数据不出设备。**
 
-## What is this
+---
 
-Every Mac with Apple Silicon has a **built-in speech recognizer** — Apple's on-device SpeechAnalyzer, shipped as part of the [Speech framework](https://developer.apple.com/documentation/speech) (macOS 26+). **ohr wraps it** in a CLI and an OpenAI-compatible HTTP server — so you can actually use it. All inference runs **on-device**, no network calls.
+## 特性
 
-- **UNIX tool** — `ohr meeting.m4a` — file in, text out. Pipe-friendly, multiple output formats, proper exit codes
-- **Subtitle generator** — `ohr -o srt lecture.wav > lecture.srt` — SRT and VTT with precise timestamps
-- **Live transcription** — `ohr --listen` — real-time microphone input
-- **OpenAI-compatible server** — `ohr --serve` — drop-in replacement for `POST /v1/audio/transcriptions`
-- **Zero cost** — no API keys, no cloud, no subscriptions, 30 languages supported
+- 🎤 **Apple Intelligence 转录** — 使用 macOS SpeechAnalyzer，毫秒级响应
+- 🗣️ **说话人识别** — 自动检测并区分不同说话人（`--speakers` 标志）
+- 📝 **多种输出格式** — 纯文本、JSON、SRT 字幕、VTT 字幕
+- 🎙️ **麦克风实时转录** — 支持 `--listen` 模式
+- 🖥️ **OpenAI 兼容服务器** — 支持 `--serve` 模式，兼容 OpenAI Whisper API
+- 📦 **多格式支持** — m4a, wav, mp3, mp4, caf, aiff, flac
+- 🔒 **隐私优先** — 所有处理在本地完成，数据不上传云端
 
-## Requirements & Install
+## 安装
 
-- Apple Silicon Mac, macOS 26 Tahoe or newer
-- Building from source requires Command Line Tools with macOS 26 SDK (ships Swift 6.3). No Xcode required.
+### 前提条件
 
-**Homebrew** (recommended):
+- macOS 26+（Apple Silicon）
+- Xcode 26.6+ 或 Xcode-beta 27+
+- 约 700 MB 磁盘空间（首次运行自动下载 FluidAudio 模型）
 
-```bash
-brew tap Arthur-Ficial/tap
-brew install Arthur-Ficial/tap/ohr
-```
-
-**Build from source:**
+### 从源码编译
 
 ```bash
-git clone https://github.com/Arthur-Ficial/ohr.git
-cd ohr
-make install
+git clone https://github.com/yanhuicsdn/ohr-speaker.git
+cd ohr-speaker
+
+# 使用 Xcode-beta 工具链（macOS 27+）
+DEVELOPER_DIR="/Applications/Xcode-beta.app/Contents/Developer" swift build -c release
+
+# 或者使用 Xcode 正式版（macOS 26+）
+swift build -c release
+
+# 将编译好的二进制复制到 PATH 中
+cp .build/release/ohr /usr/local/bin/ohr-speaker
 ```
 
-## Quick Start
+### 直接下载
 
-### Transcribe a file
+从 [Releases](https://github.com/yanhuicsdn/ohr-speaker/releases) 页面下载预编译二进制文件。
+
+## 使用
+
+### 基础转录
 
 ```bash
-ohr meeting.m4a
+ohr-speaker 音频文件.wav
 ```
 
-### Generate subtitles
+### 带说话人识别
 
 ```bash
-# SRT format
-ohr -o srt lecture.wav > lecture.srt
-
-# WebVTT format
-ohr --vtt interview.m4a > interview.vtt
+ohr-speaker --speakers 音频文件.wav
 ```
 
-### JSON output with segments
+输出示例：
+
+```
+【S1】
+都会有一个平台管理一般就有个用户中心...
+
+【S2】
+一个全的给个全的让用这样东西对他这个就比较清晰...
+
+【S1】
+对，就是他们省业务层面对这个权限的隔离是要求...
+```
+
+### 输出为 SRT 字幕
 
 ```bash
-ohr -o json recording.m4a | jq .
+ohr-speaker --speakers -o srt 音频文件.wav > 字幕.srt
 ```
 
-```json
-{
-  "model": "apple-speechanalyzer",
-  "text": "Hello, this is a test of the speech to text system.",
-  "segments": [
-    { "id": 0, "start": 0.0, "end": 1.86, "text": "Hello, this is a test" },
-    { "id": 1, "start": 1.86, "end": 4.44, "text": "of the speech to text system." }
-  ],
-  "duration": 4.44,
-  "language": "en",
-  "metadata": { "on_device": true, "version": "0.1.3" }
-}
-```
-
-### Timestamps in plain text
+### 输出为 JSON
 
 ```bash
-ohr --timestamps meeting.m4a
+ohr-speaker --speakers -o json 音频文件.wav
 ```
 
-```
-[00:00:00,000] Hello, this is a test
-[00:00:01,860] of the speech to text system.
-```
-
-### Pipe from stdin
+### 麦克风实时转录
 
 ```bash
-cat recording.wav | ohr
+ohr-speaker --listen --speakers
 ```
 
-### Pipe to apfel for summarization
+### 启动 OpenAI 兼容服务器
 
 ```bash
-ohr meeting.m4a | apfel "summarize this meeting"
+ohr-speaker --serve --port 11434
 ```
 
-### Live microphone transcription
+然后可以用任何 OpenAI Whisper 客户端调用：
 
 ```bash
-ohr --listen                    # plain text with timestamps
-ohr --listen --json             # JSONL stream
-ohr --listen --srt              # SRT as you speak
+curl http://localhost:11434/v1/audio/transcriptions \
+  -F "file=@audio.wav" \
+  -F "model=whisper-1" \
+  -F "diarize=true"
 ```
 
-### Select language
-
-```bash
-ohr -l de-DE meeting.m4a       # German
-ohr -l fr-FR interview.m4a     # French
-ohr -l ja-JP recording.m4a     # Japanese
-```
-
-### OpenAI-compatible server
-
-```bash
-# Start server
-ohr --serve
-
-# In another terminal:
-curl -X POST http://localhost:11434/v1/audio/transcriptions \
-  -F file=@meeting.m4a \
-  -F model=apple-speechanalyzer
-```
-
-```json
-{"text": "Hello, this is a test of the speech to text system."}
-```
-
-All five response formats:
-
-```bash
-# JSON (default)
-curl -X POST http://localhost:11434/v1/audio/transcriptions \
-  -F file=@audio.m4a -F response_format=json
-
-# Verbose JSON (with segments, timestamps, duration)
-curl -X POST http://localhost:11434/v1/audio/transcriptions \
-  -F file=@audio.m4a -F response_format=verbose_json
-
-# Plain text
-curl -X POST http://localhost:11434/v1/audio/transcriptions \
-  -F file=@audio.m4a -F response_format=text
-
-# SRT subtitles
-curl -X POST http://localhost:11434/v1/audio/transcriptions \
-  -F file=@audio.m4a -F response_format=srt
-
-# WebVTT subtitles
-curl -X POST http://localhost:11434/v1/audio/transcriptions \
-  -F file=@audio.m4a -F response_format=vtt
-```
-
-## Demos
-
-See [`demo/`](./demo/) for real-world shell scripts powered by ohr.
-
-**[subtitle](./demo/subtitle)** — generate subtitles:
-```bash
-demo/subtitle lecture.m4a --save           # saves lecture.srt next to file
-```
-
-**[audio-grep](./demo/audio-grep)** — search inside audio files:
-```bash
-demo/audio-grep "budget" meetings/*.m4a    # find mentions with timestamps
-demo/audio-grep -c "deadline" *.m4a        # count matches per file
-```
-
-**[minutes](./demo/minutes)** — meeting to minutes (ohr + apfel):
-```bash
-demo/minutes standup.m4a -o markdown > standup.md
-```
-
-**[batch-transcribe](./demo/batch-transcribe)** — transcribe a whole folder:
-```bash
-demo/batch-transcribe ~/recordings/ -o srt
-```
-
-**[whisper-compat](./demo/whisper-compat)** — drop-in Whisper CLI replacement:
-```bash
-demo/whisper-compat audio.m4a --output_format srt --language en
-```
-
-Also in `demo/`:
-- **[dictate](./demo/dictate)** — speak into a text file via microphone
-- **[live-caption](./demo/live-caption)** — real-time captions in the terminal
-- **[voice-search](./demo/voice-search)** — search spoken content across files
-- **[translate-audio](./demo/translate-audio)** — transcribe then translate (ohr + apfel)
-- **[action-items](./demo/action-items)** — extract to-dos from meetings (ohr + apfel)
-- **[podcast-chapters](./demo/podcast-chapters)** — timestamped chapter markers (ohr + apfel)
-- **[voice-note](./demo/voice-note)** — record, transcribe, and summarize (ohr + apfel)
-
-## OpenAI API Compatibility
-
-**Base URL:** `http://localhost:11434/v1`
-
-| Feature | Status | Notes |
-|---------|--------|-------|
-| `POST /v1/audio/transcriptions` | Supported | All 5 response formats |
-| `GET /v1/models` | Supported | Returns `apple-speechanalyzer` |
-| `GET /health` | Supported | Model availability, formats, languages |
-| `GET /v1/logs` | Debug only | Available with `--debug` |
-| `GET /v1/logs/stats` | Debug only | Available with `--debug` |
-| `response_format` | Supported | `json`, `verbose_json`, `text`, `srt`, `vtt` |
-| `language` | Supported | BCP-47 language code |
-| `model` | Accepted | Ignored (only one model) |
-| `prompt` | Accepted | Ignored (SpeechAnalyzer doesn't support prompting) |
-| `temperature` | Accepted | Validated (0.0–1.0) |
-| CORS | Supported | Enable with `--cors` |
-| Token auth | Supported | `--token <secret>` or `--token-auto` |
-| `POST /v1/chat/completions` | 501 | Use [apfel](https://github.com/Arthur-Ficial/apfel) |
-| `POST /v1/embeddings` | 501 | Use [kern](https://github.com/Arthur-Ficial/kern) |
-
-## Supported Formats
-
-| Format | Extensions |
-|--------|-----------|
-| Apple M4A | `.m4a` |
-| WAV | `.wav`, `.wave` |
-| MP3 | `.mp3` |
-| MPEG-4 | `.mp4` |
-| Core Audio | `.caf` |
-| AIFF | `.aiff`, `.aif` |
-| FLAC | `.flac` |
-
-## Supported Languages
-
-30 languages including English, German, Spanish, French, Italian, Japanese, Korean, Portuguese, Chinese (Simplified, Traditional, Cantonese).
-
-```bash
-ohr --model-info    # full list
-```
-
-## Performance
-
-Tested on Apple M2 with synthetic speech. Real-world performance may vary.
-
-| Audio Length | Transcribe Time | Speed |
-|-------------|-----------------|-------|
-| 5 seconds | 300ms | 8x real-time |
-| 30 seconds | 600ms | 39x real-time |
-| 1 minute | 1.5s | 46x real-time |
-| 3 minutes | 2.5s | 58x real-time |
-| 10 minutes | 4.7s | 57x real-time |
-
-10 minutes of audio transcribes in under 5 seconds. No upper limit found.
-
-## Limitations
-
-| Constraint | Detail |
-|------------|--------|
-| Platform | macOS 26+, Apple Silicon only |
-| Model | One model (`apple-speechanalyzer`), not configurable |
-| Accuracy | ~90-95% on clear synthetic speech. Lower on real speech with noise, accents, or multiple speakers |
-| Numbers | Spoken numbers sometimes confused with ordinals ("five second" → "52nd") |
-| Languages | 30 languages supported, but accuracy tested only for English. Other languages need the `-l` flag |
-| No diarization | Cannot distinguish between different speakers |
-| Audio formats | m4a, wav, mp3, mp4, caf, aiff, flac. No OGG, OPUS, or WebM |
-| apfel integration | When piping to apfel, transcripts longer than ~3000 words may exceed apfel's 4096-token context window |
-| Testing gap | All testing used synthetic `say` command speech, not real human recordings |
-
-See [docs/testing.md](docs/testing.md) for the full QA report with methodology and detailed results.
-
-## CLI Reference
+### 完整选项
 
 ```
-ohr <file>                     Transcribe audio file
-ohr -o srt <file>              Generate SRT subtitles
-ohr -o vtt <file>              Generate VTT subtitles
-ohr -o json <file>             JSON output with segments
-ohr --listen                   Live microphone transcription
-ohr --serve                    Start OpenAI-compatible server
-cat audio.wav | ohr            Transcribe from stdin
+USAGE:
+  ohr <file>                   Transcribe an audio file
+  ohr -o srt <file>            Transcribe to SRT subtitles
+  ohr -o vtt <file>            Transcribe to VTT subtitles
+  ohr -o json <file>           Transcribe to JSON with segments
+  ohr --listen                 Live microphone transcription
+  ohr --serve                  Start OpenAI-compatible HTTP server
+  cat audio.wav | ohr          Transcribe from stdin
+
+OPTIONS:
+  -o, --output <format>        Output: plain (default), json, srt, vtt
+  --json                       Shorthand for -o json
+  --srt                        Shorthand for -o srt
+  --vtt                        Shorthand for -o vtt
+  --timestamps                 Show timestamps in plain text output
+  --speakers                   Enable speaker diarization (requires FluidAudio)
+  -l, --language <code>        Language code (e.g. en-US, de-DE)
+  -q, --quiet                  Suppress headers and chrome
+  --no-color                   Disable ANSI colors
 ```
 
-**Output options:**
+## 与原始 ohr 的区别
 
-| Flag | Description |
-|------|-------------|
-| `-o, --output <fmt>` | Output format: `plain` (default), `json`, `srt`, `vtt` |
-| `--json` | Shorthand for `-o json` |
-| `--srt` | Shorthand for `-o srt` |
-| `--vtt` | Shorthand for `-o vtt` |
-| `--timestamps` | Show timestamps in plain text output |
-| `-l, --language <code>` | Language code (e.g. `en-US`, `de-DE`) |
-| `-q, --quiet` | Suppress headers and chrome |
-| `--no-color` | Disable ANSI colors |
+| 特性 | ohr | ohr-speaker |
+|------|-----|-------------|
+| 说话人识别 | ❌ | ✅ `--speakers` |
+| 转录引擎 | Apple SpeechAnalyzer | Apple SpeechAnalyzer |
+| 声纹引擎 | — | FluidAudio OfflineDiarizer |
+| 模型下载 | 0 MB | ~700 MB（一次性） |
+| 输出格式 | plain/json/srt/vtt | plain/json/srt/vtt + 说话人标签 |
+| 服务器模式 | ✅ | ✅（支持 `diarize` 参数） |
 
-**Server options** (`--serve`):
+## 性能
 
-| Flag | Description |
-|------|-------------|
-| `--port <n>` | Server port (default: 11434) |
-| `--host <addr>` | Bind address (default: 127.0.0.1) |
-| `--cors` | Enable CORS headers for browser clients |
-| `--allowed-origins <origins>` | Add comma-separated allowed origins |
-| `--no-origin-check` | Disable origin checking |
-| `--token <secret>` | Require Bearer token authentication |
-| `--token-auto` | Generate and print a random Bearer token |
-| `--public-health` | Keep `/health` unauthenticated on non-loopback |
-| `--footgun` | Disable all protections |
-| `--max-concurrent <n>` | Max concurrent requests (default: 5) |
-| `--debug` | Verbose logging and enable `/v1/logs` endpoints |
+| 音频时长 | 纯转录 | 说话人识别（额外） |
+|---------|--------|-------------------|
+| 1 分钟 | ~1s | ~1s |
+| 10 分钟 | ~3s | ~2s |
+| 31 分钟 | ~10s | ~5s |
+| 1 小时 | ~20s | ~10s |
 
-**Info options:**
+## 技术原理
 
-| Flag | Description |
-|------|-------------|
-| `-v, --version` | Print version |
-| `-h, --help` | Show help |
-| `--release` | Show detailed build info |
-| `--model-info` | Show model capabilities and languages |
+1. **转录**：使用 Apple 的 `SpeechAnalyzer` + `SpeechTranscriber` 框架，将音频转为带时间戳的文本段
+2. **声纹**：使用 FluidAudio 的 `OfflineDiarizerManager`，对音频进行说话人分割
+3. **对齐**：通过时间重叠最大化算法，将转录段与说话人段对齐，为每个文本段分配说话人标签
 
-### Exit Codes
+## 致谢
 
-| Code | Meaning |
-|------|---------|
-| 0 | Success |
-| 1 | Runtime error |
-| 2 | Usage error (bad flags) |
-| 3 | Unsupported audio format |
-| 4 | File not found |
-| 5 | Transcription failed |
-| 6 | Rate limited |
+- [Arthur-Ficial/ohr](https://github.com/Arthur-Ficial/ohr) — 原始 ohr 项目
+- [FluidInference/FluidAudio](https://github.com/FluidInference/FluidAudio) — FluidAudio 声纹引擎
+- Apple Speech 框架 — macOS 内置语音识别能力
 
-### Environment Variables
-
-| Variable | Description |
-|----------|-------------|
-| `OHR_PORT` | Server port (default: 11434) |
-| `OHR_HOST` | Server bind address (default: 127.0.0.1) |
-| `OHR_TOKEN` | Bearer token for server authentication |
-| `OHR_LANGUAGE` | Default language code |
-| `NO_COLOR` | Disable colors ([no-color.org](https://no-color.org)) |
-
-## Architecture
-
-```
-CLI (file/stdin/mic) ──┐
-                       ├──→ Speech.SpeechAnalyzer (file transcription)
-                       ├──→ Speech.SpeechTranscriber (live microphone)
-HTTP Server (/v1/*) ───┘    (100% on-device, zero network)
-```
-
-Built with Swift 6.3 strict concurrency. Single `Package.swift`, three targets:
-- `OhrCore` — pure logic library (no Speech framework dependency, unit-testable)
-- `ohr` — executable (CLI + server)
-- `ohr-tests` — 109 unit tests
-
-**No Xcode required.** Builds and tests with Command Line Tools only.
-
-## Build & Test
-
-```bash
-# Build + install (auto-bumps patch version each time)
-make install                             # build release + install to /usr/local/bin
-make build                               # build release only (no install)
-
-# Version management (zero manual editing)
-make version                             # print current version
-make release-minor                       # bump minor: 0.1.x -> 0.2.0
-make release-major                       # bump major: 0.x.y -> 1.0.0
-
-# Debug build (no version bump, uses swift directly)
-swift build                              # quick debug build
-
-# Unit tests
-swift run ohr-tests                      # 109 pure Swift unit tests (no XCTest needed)
-
-# Integration tests (requires server running)
-ohr --serve --token test --debug &       # start server
-OHR_TEST_TOKEN=test python3 -m pytest Tests/integration/ -v  # 42 integration tests
-```
-
-Every `make build`/`make install` automatically:
-- Bumps the patch version (`.version` file is the single source of truth)
-- Generates build metadata (commit, date, Swift version) viewable via `ohr --release`
-
-## Part of the apfel ecosystem
-
-| Tool | What | Apple Framework | Repo |
-|------|------|-----------------|------|
-| [apfel](https://github.com/Arthur-Ficial/apfel) | LLM (text generation) | FoundationModels | golden example |
-| **ohr** | Speech-to-text | SpeechAnalyzer | you are here |
-| [kern](https://github.com/Arthur-Ficial/kern) | Text embeddings | NLContextualEmbedding | sister project |
-| [auge](https://github.com/Arthur-Ficial/auge) | Vision / OCR | Vision | sister project |
-
-Meta-repo: [apfel-ecosystem](https://github.com/Arthur-Ficial/apfel-ecosystem)
-
-## License
+## 许可
 
 [MIT](LICENSE)
