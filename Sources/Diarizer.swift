@@ -87,7 +87,7 @@ func defaultDiarizerConfig() -> OfflineDiarizerConfig {
     )
 }
 
-func runDiarization(fileURL: URL, engine: String = "sortformer") async throws -> [SpeakerSegment] {
+func runDiarization(fileURL: URL, engine: String = "campplus") async throws -> [SpeakerSegment] {
     switch engine {
     case "sortformer":
         return try await runSortformer(fileURL: fileURL)

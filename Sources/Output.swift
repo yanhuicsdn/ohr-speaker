@@ -34,7 +34,7 @@ nonisolated(unsafe) var quietMode = false
 nonisolated(unsafe) var enableSpeakerDiarization = false
 
 /// Diarization engine to use: "offlineVbx", "sortformer", or "campplus"
-nonisolated(unsafe) var diarizationEngine = "offlineVbx"
+nonisolated(unsafe) var diarizationEngine = "campplus"
 
 // MARK: - ANSI Colors
 
