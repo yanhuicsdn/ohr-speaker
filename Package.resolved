@@ -1,5 +1,5 @@
 {
-  "originHash" : "cf03eaba851ae525dabbe6fcb5cb94b57a90a53398a709219a08c40267aed65e",
+  "originHash" : "22d6c370af9045396e5e314f207b34834babce6dac403850d99e3e03a3f68186",
   "pins" : [
     {
       "identity" : "async-http-client",
@@ -16,7 +16,7 @@
       "location" : "https://github.com/FluidInference/FluidAudio.git",
       "state" : {
         "branch" : "main",
-        "revision" : "300165b240c45375add402265f62410b6df33cf1"
+        "revision" : "88d6d8166880dee1ac7c32c80f8e10cd782f8ca8"
       }
     },
     {

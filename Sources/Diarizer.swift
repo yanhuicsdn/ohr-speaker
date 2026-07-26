@@ -87,8 +87,213 @@ func defaultDiarizerConfig() -> OfflineDiarizerConfig {
     )
 }
 
-func runDiarization(fileURL: URL) async throws -> [SpeakerSegment] {
+func runDiarization(fileURL: URL, engine: String = "sortformer") async throws -> [SpeakerSegment] {
+    switch engine {
+    case "sortformer":
+        return try await runSortformer(fileURL: fileURL)
+    case "campplus":
+        return try await runCampplusDiarization(fileURL: fileURL)
+    default:
+        return try await runOfflineVbx(fileURL: fileURL)
+    }
+}
+
+func runOfflineVbx(fileURL: URL) async throws -> [SpeakerSegment] {
     try await runDiarization(fileURL: fileURL, config: defaultDiarizerConfig())
+}
+
+/// Run CAM++ based diarization: segmentation → CAM++ embeddings → cosine clustering.
+private func runCampplusDiarization(fileURL: URL) async throws -> [SpeakerSegment] {
+    let targetSr: Double = 16_000
+
+    // Step 1: Use OfflineDiarizerManager with WeSpeaker to get speech segment boundaries
+    let tempConfig = defaultDiarizerConfig()
+    let manager = OfflineDiarizerManager(config: tempConfig)
+    try await manager.prepareModels()
+    let converter = AudioConverter()
+    let audio16k = try converter.resampleAudioFile(path: fileURL.path)
+    let timeline = try await manager.process(audio: audio16k)
+
+    // Extract segment boundaries from the timeline (ignore speaker labels)
+    var rawSegments: [(start: Double, end: Double)] = []
+    for seg in timeline.segments {
+        let tStart = Double(seg.startTimeSeconds)
+        let tEnd = Double(seg.endTimeSeconds)
+        if tEnd - tStart >= 1.0 {
+            rawSegments.append((tStart, tEnd))
+        }
+    }
+
+    guard !rawSegments.isEmpty else { return [] }
+
+    // Split long segments for better speaker change detection
+    let maxSegDur: Double = 5.0
+    var splitSegments: [(start: Double, end: Double)] = []
+    for seg in rawSegments {
+        var t = seg.start
+        while t < seg.end {
+            let e = min(t + maxSegDur, seg.end)
+            splitSegments.append((t, e))
+            t = e
+        }
+    }
+
+    // Step 2: Extract CAM++ embeddings for each segment
+    let campplus = try await CAMPlusEmbedder.load()
+    var embeddings: [[Float]] = []
+    var segTimes: [(start: Double, end: Double)] = []
+
+    for seg in splitSegments {
+        let startSample = Int(seg.start * targetSr)
+        let endSample = min(Int(seg.end * targetSr), audio16k.count)
+        guard endSample > startSample + 1600 else { continue }
+
+        let segSamples = Array(audio16k[startSample..<endSample])
+        do {
+            let emb = try await campplus.embed(samples: segSamples)
+            embeddings.append(emb)
+            segTimes.append(seg)
+        } catch {
+            continue
+        }
+    }
+
+    guard embeddings.count >= 2 else {
+        return segTimes.map { SpeakerSegment(speakerId: "S1", start: $0.start, end: $0.end, confidence: 1.0) }
+    }
+
+    // Step 3: Agglomerative clustering by cosine similarity
+    let speakerLabels = agglomerativeCluster(embeddings: embeddings, threshold: Float(0.65))
+
+    // Step 4: Build segments
+    var result: [SpeakerSegment] = []
+    for (i, label) in speakerLabels.enumerated() {
+        guard i < segTimes.count else { break }
+        result.append(SpeakerSegment(
+            speakerId: "S\(label + 1)",
+            start: segTimes[i].start,
+            end: segTimes[i].end,
+            confidence: 1.0
+        ))
+    }
+
+    let sorted = result.sorted { $0.start < $1.start }
+    let merged = mergeSameSpeakerSegments(sorted)
+    let smoothed = smoothSpeakerTransitions(merged)
+
+    return smoothed
+}
+
+/// Agglomerative clustering of embeddings by cosine similarity.
+/// Returns cluster labels (0-based) for each embedding.
+private func agglomerativeCluster(embeddings: [[Float]], threshold: Float) -> [Int] {
+    let n = embeddings.count
+    guard n > 0 else { return [] }
+    guard n > 1 else { return [0] }
+
+    // Compute cosine similarity matrix
+    var sim = [[Float]](repeating: [Float](repeating: 0, count: n), count: n)
+    for i in 0..<n {
+        for j in i..<n {
+            let s = CAMPlusEmbedder.cosine(embeddings[i], embeddings[j])
+            sim[i][j] = s
+            sim[j][i] = s
+        }
+    }
+
+    // Initialize each point as its own cluster
+    var clusters = Array(0..<n)
+
+    // Centroid-based agglomerative clustering
+    var active = Set(0..<n)
+    var changed = true
+
+    while changed && active.count > 1 {
+        changed = false
+        // Find the most similar pair of clusters
+        var bestI = 0, bestJ = 0
+        var bestSim: Float = -1
+        var pairs: [(Int, Int)] = []
+
+        // Only check pairs in the upper triangle of the cluster pair matrix
+        let activeList = Array(active).sorted()
+        for idx in 0..<activeList.count {
+            for jdx in (idx + 1)..<activeList.count {
+                let ci = activeList[idx]
+                let cj = activeList[jdx]
+
+                // Compute average inter-cluster similarity
+                let membersI = clusters.enumerated().filter { $0.element == ci }.map { $0.offset }
+                let membersJ = clusters.enumerated().filter { $0.element == cj }.map { $0.offset }
+                var totalSim: Float = 0
+                var count = 0
+                for mi in membersI {
+                    for mj in membersJ {
+                        totalSim += sim[mi][mj]
+                        count += 1
+                    }
+                }
+                let avgSim = count > 0 ? totalSim / Float(count) : 0
+
+                if avgSim > bestSim {
+                    bestSim = avgSim
+                    bestI = ci
+                    bestJ = cj
+                    pairs = [(ci, cj)]
+                }
+            }
+        }
+
+        if bestSim > threshold {
+            // Merge bestJ into bestI
+            for k in 0..<n {
+                if clusters[k] == bestJ {
+                    clusters[k] = bestI
+                }
+            }
+            active.remove(bestJ)
+            changed = true
+        }
+    }
+
+    // Reindex labels to 0, 1, 2, ...
+    let uniqueLabels = Array(Set(clusters)).sorted()
+    var labelMap: [Int: Int] = [:]
+    for (newLabel, oldLabel) in uniqueLabels.enumerated() {
+        labelMap[oldLabel] = newLabel
+    }
+    return clusters.map { labelMap[$0] ?? 0 }
+}
+
+/// Run speaker diarization using FluidAudio's Sortformer offline diarizer (≤4 speakers).
+private func runSortformer(fileURL: URL) async throws -> [SpeakerSegment] {
+    let sortformer = OfflineSortformerDiarizer()
+    try await sortformer.initializeFromHuggingFace()
+    let timeline = try sortformer.processComplete(audioFileURL: fileURL)
+
+    var rawSegments: [SpeakerSegment] = []
+    let speakerIdxList = timeline.speakers.keys.sorted()
+    for idx in speakerIdxList {
+        guard let speaker = timeline.speakers[idx] else { continue }
+        let label = "S\(idx +  1)"
+        for seg in speaker.finalizedSegments {
+            rawSegments.append(SpeakerSegment(
+                speakerId: label,
+                start: Double(seg.startTime),
+                end: Double(seg.endTime),
+                confidence: Double(seg.activity)
+            ))
+        }
+    }
+
+    guard !rawSegments.isEmpty else { return [] }
+
+    let filtered = rawSegments.filter { $0.end - $0.start >= DiarizerConfig.minSegmentDuration }
+    let sorted = filtered.sorted { $0.start < $1.start }
+    let merged = mergeSameSpeakerSegments(sorted)
+    let smoothed = smoothSpeakerTransitions(merged)
+
+    return smoothed
 }
 
 /// Run speaker diarization on an audio file using FluidAudio's offline pipeline

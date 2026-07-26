@@ -33,6 +33,9 @@ nonisolated(unsafe) var quietMode = false
 /// True if --speakers flag was passed (enable speaker diarization)
 nonisolated(unsafe) var enableSpeakerDiarization = false
 
+/// Diarization engine to use: "offlineVbx", "sortformer", or "campplus"
+nonisolated(unsafe) var diarizationEngine = "offlineVbx"
+
 // MARK: - ANSI Colors
 
 enum ANSIColor: String, Sendable {

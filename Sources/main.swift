@@ -142,6 +142,8 @@ while !args.isEmpty {
         noColorFlag = true
     case "--speakers":
         enableSpeakerDiarization = true
+    case "--engine":
+        diarizationEngine = nextArg(&args, arg)
     case "--tune":
         mode = "tune"
 

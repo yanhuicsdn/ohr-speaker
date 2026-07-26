@@ -28,7 +28,7 @@ struct TranscriptionResult: Sendable {
 ///   - language: Optional BCP-47 language code (e.g. "en-US"). Nil = current locale.
 ///   - enableDiarization: If true, run speaker diarization after transcription.
 /// - Returns: TranscriptionResult with text, segments, and metadata
-func transcribeFile(url fileURL: URL, language: String? = nil, enableDiarization: Bool = false) async throws -> TranscriptionResult {
+func transcribeFile(url fileURL: URL, language: String? = nil, enableDiarization: Bool = false, diarizationEngine: String = "offlineVbx") async throws -> TranscriptionResult {
     let locale = language.map { Locale(identifier: $0) } ?? .current
     let transcriber = SpeechTranscriber(locale: locale, preset: .timeIndexedTranscriptionWithAlternatives)
 
@@ -61,7 +61,7 @@ func transcribeFile(url fileURL: URL, language: String? = nil, enableDiarization
     if enableDiarization, !segments.isEmpty {
         printStderr(styled("Running speaker diarization...", .dim))
         do {
-            let speakerSegments = try await runDiarization(fileURL: fileURL)
+            let speakerSegments = try await runDiarization(fileURL: fileURL, engine: diarizationEngine)
             if !speakerSegments.isEmpty {
                 segments = alignSpeakers(transcriptSegments: segments, speakerSegments: speakerSegments)
                 printStderr(styled("Diarization complete: \(Set(speakerSegments.map(\.speakerId)).count) speakers detected.", .dim))

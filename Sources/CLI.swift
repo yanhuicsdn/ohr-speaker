@@ -18,7 +18,7 @@ func transcribeFileCommand(path: String, language: String?, timestamps: Bool) as
         throw OhrError.unsupportedFormat(url.pathExtension)
     }
 
-    let result = try await transcribeFile(url: url, language: language, enableDiarization: enableSpeakerDiarization)
+    let result = try await transcribeFile(url: url, language: language, enableDiarization: enableSpeakerDiarization, diarizationEngine: diarizationEngine)
 
     switch outputFormat {
     case .plain:
