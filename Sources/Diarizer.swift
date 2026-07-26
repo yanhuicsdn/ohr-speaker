@@ -102,11 +102,11 @@ func runOfflineVbx(fileURL: URL) async throws -> [SpeakerSegment] {
     try await runDiarization(fileURL: fileURL, config: defaultDiarizerConfig())
 }
 
-/// Run CAM++ based diarization: segmentation → CAM++ embeddings → cosine clustering.
+/// Run CAM++ based diarization: Seg-3 segmentation → CAM++ embeddings → sequential adaptive clustering.
 private func runCampplusDiarization(fileURL: URL) async throws -> [SpeakerSegment] {
     let targetSr: Double = 16_000
 
-    // Step 1: Use OfflineDiarizerManager with WeSpeaker to get speech segment boundaries
+    // Step 1: Load audio and run OfflineDiarizerManager to get speech segments
     let tempConfig = defaultDiarizerConfig()
     let manager = OfflineDiarizerManager(config: tempConfig)
     try await manager.prepareModels()
@@ -114,31 +114,35 @@ private func runCampplusDiarization(fileURL: URL) async throws -> [SpeakerSegmen
     let audio16k = try converter.resampleAudioFile(path: fileURL.path)
     let timeline = try await manager.process(audio: audio16k)
 
-    // Extract segment boundaries from the timeline (ignore speaker labels)
+    // Extract segment boundaries (keep natural Seg-3 boundaries, NO 5s splitting)
     var rawSegments: [(start: Double, end: Double)] = []
     for seg in timeline.segments {
         let tStart = Double(seg.startTimeSeconds)
         let tEnd = Double(seg.endTimeSeconds)
-        if tEnd - tStart >= 1.0 {
+        if tEnd - tStart >= 0.5 {
             rawSegments.append((tStart, tEnd))
         }
     }
 
     guard !rawSegments.isEmpty else { return [] }
 
-    // Split long segments for better speaker change detection
-    let maxSegDur: Double = 5.0
+    // Step 2: Split segments to create more data points for clustering.
+    // Seg-3 segments may span multiple speaker turns; splitting them helps
+    // the clustering algorithm detect speaker changes.
+    let maxChunkDur: Double = 4.0
     var splitSegments: [(start: Double, end: Double)] = []
     for seg in rawSegments {
         var t = seg.start
         while t < seg.end {
-            let e = min(t + maxSegDur, seg.end)
-            splitSegments.append((t, e))
+            let e = min(t + maxChunkDur, seg.end)
+            if e - t >= 0.5 {
+                splitSegments.append((t, e))
+            }
             t = e
         }
     }
 
-    // Step 2: Extract CAM++ embeddings for each segment
+    // Step 3: Extract CAM++ embeddings for each split segment
     let campplus = try await CAMPlusEmbedder.load()
     var embeddings: [[Float]] = []
     var segTimes: [(start: Double, end: Double)] = []
@@ -146,7 +150,7 @@ private func runCampplusDiarization(fileURL: URL) async throws -> [SpeakerSegmen
     for seg in splitSegments {
         let startSample = Int(seg.start * targetSr)
         let endSample = min(Int(seg.end * targetSr), audio16k.count)
-        guard endSample > startSample + 1600 else { continue }
+        guard endSample > startSample + 3200 else { continue }
 
         let segSamples = Array(audio16k[startSample..<endSample])
         do {
@@ -158,14 +162,16 @@ private func runCampplusDiarization(fileURL: URL) async throws -> [SpeakerSegmen
         }
     }
 
-    guard embeddings.count >= 2 else {
+    guard !embeddings.isEmpty else { return [] }
+    guard embeddings.count >= 3 else {
         return segTimes.map { SpeakerSegment(speakerId: "S1", start: $0.start, end: $0.end, confidence: 1.0) }
     }
 
-    // Step 3: Agglomerative clustering by cosine similarity
-    let speakerLabels = agglomerativeCluster(embeddings: embeddings, threshold: Float(0.65))
+    // Step 4: Sequential centroid-based speaker assignment
+    // Each segment (in temporal order) is compared to existing speaker centroids.
+    let speakerLabels = assignSpeakersSequentially(embeddings: embeddings, assignmentThreshold: 0.45, mergeThreshold: 0.50)
 
-    // Step 4: Build segments
+    // Step 5: Build segments
     var result: [SpeakerSegment] = []
     for (i, label) in speakerLabels.enumerated() {
         guard i < segTimes.count else { break }
@@ -184,85 +190,179 @@ private func runCampplusDiarization(fileURL: URL) async throws -> [SpeakerSegmen
     return smoothed
 }
 
-/// Agglomerative clustering of embeddings by cosine similarity.
-/// Returns cluster labels (0-based) for each embedding.
-private func agglomerativeCluster(embeddings: [[Float]], threshold: Float) -> [Int] {
+/// Merge adjacent segments if the gap between them is small.
+private func mergeAdjacentSegments(_ segments: [(start: Double, end: Double)], minGap: Double, maxDur: Double) -> [(start: Double, end: Double)] {
+    guard !segments.isEmpty else { return [] }
+    var merged: [(start: Double, end: Double)] = []
+    var current = segments[0]
+
+    for seg in segments.dropFirst() {
+        let gap = seg.start - current.end
+        let newDur = seg.end - current.start
+        // Merge if gap is small AND resulting duration doesn't exceed maxDur
+        if gap <= minGap && newDur <= maxDur {
+            current = (current.start, seg.end)
+        } else {
+            if current.end - current.start >= 0.5 {
+                merged.append(current)
+            }
+            current = seg
+        }
+    }
+    if current.end - current.start >= 0.5 {
+        merged.append(current)
+    }
+    return merged
+}
+
+/// Two-pass speaker clustering:
+///   Pass 1 — sequential assignment using the FIRST segment of each speaker
+///             as an anchor (prevents centroid drift).
+///   Pass 2 — batch re-assignment (k-means style) that recomputes centroids
+///             from all members, then reassigns every segment.
+/// This avoids both centroid drift (pass 1) and order-dependence (pass 2).
+private func assignSpeakersSequentially(embeddings: [[Float]], assignmentThreshold: Float, mergeThreshold: Float) -> [Int] {
     let n = embeddings.count
     guard n > 0 else { return [] }
     guard n > 1 else { return [0] }
 
-    // Compute cosine similarity matrix
-    var sim = [[Float]](repeating: [Float](repeating: 0, count: n), count: n)
-    for i in 0..<n {
-        for j in i..<n {
-            let s = CAMPlusEmbedder.cosine(embeddings[i], embeddings[j])
-            sim[i][j] = s
-            sim[j][i] = s
+    // ── Pass 1: Sequential anchor-based assignment ──
+    // Compare each segment against the FIRST embedding of each existing speaker
+    // (not a moving-average centroid).  This prevents drift.
+    var labels = [Int](repeating: -1, count: n)
+    var anchors: [[Float]] = []  // first embedding per speaker (never updated)
+    var centroids: [[Float]] = [] // used in pass 2; for pass 1 we only need anchors
+
+    // Segment 0 → speaker 0
+    labels[0] = 0
+    anchors.append(embeddings[0])
+    centroids.append(embeddings[0]) // initial centroid
+
+    for i in 1..<n {
+        var bestLabel = -1
+        var bestSim: Float = -1
+
+        for (spkIdx, anchor) in anchors.enumerated() {
+            let sim = CAMPlusEmbedder.cosine(embeddings[i], anchor)
+            if sim > bestSim {
+                bestSim = sim
+                bestLabel = spkIdx
+            }
+        }
+
+        if bestSim >= assignmentThreshold {
+            labels[i] = bestLabel
+        } else {
+            // Create new speaker
+            let newLabel = centroids.count
+            labels[i] = newLabel
+            anchors.append(embeddings[i])
+            centroids.append(embeddings[i])
         }
     }
 
-    // Initialize each point as its own cluster
-    var clusters = Array(0..<n)
+    // ── Pass 2: Batch re-assignment ──
+    // Recompute centroids from all assigned members, then re-assign every
+    // segment.  Repeat a fixed number of iterations for convergence.
+    var currentLabels = labels
+    for _ in 0..<5 {
+        // Recompute centroids
+        var newCentroids: [[Float]] = Array(repeating: [Float](repeating: 0, count: embeddings[0].count), count: centroids.count)
+        var newCounts = [Int](repeating: 0, count: centroids.count)
+        for i in 0..<n {
+            let spk = currentLabels[i]
+            guard spk < newCentroids.count else { continue }
+            for d in 0..<newCentroids[spk].count {
+                newCentroids[spk][d] += embeddings[i][d]
+            }
+            newCounts[spk] += 1
+        }
+        // Normalize centroids to L2-unit
+        for spk in 0..<newCentroids.count where newCounts[spk] > 0 {
+            let inv = 1.0 / Float(newCounts[spk])
+            for d in 0..<newCentroids[spk].count {
+                newCentroids[spk][d] *= inv
+            }
+            let norm = sqrt(newCentroids[spk].reduce(0) { $0 + $1 * $1 })
+            if norm > 1e-9 {
+                for d in 0..<newCentroids[spk].count {
+                    newCentroids[spk][d] /= norm
+                }
+            }
+        }
+        centroids = newCentroids
 
-    // Centroid-based agglomerative clustering
-    var active = Set(0..<n)
+        // Re-assign each segment to the closest centroid
+        var changed = false
+        for i in 0..<n {
+            var bestSpk = 0
+            var bestSim: Float = -1
+            for (spkIdx, c) in centroids.enumerated() {
+                let sim = CAMPlusEmbedder.cosine(embeddings[i], c)
+                if sim > bestSim {
+                    bestSim = sim
+                    bestSpk = spkIdx
+                }
+            }
+            if currentLabels[i] != bestSpk {
+                currentLabels[i] = bestSpk
+                changed = true
+            }
+        }
+        if !changed { break }
+    }
+
+    // ── Post-processing: merge similar centroids ──
+    // Use a slightly higher threshold so we only merge speakers that are genuinely
+    // the same person.
+    let mergedLabels = mergeSimilarSpeakers(labels: currentLabels, centroids: centroids, threshold: mergeThreshold)
+
+    return mergedLabels
+}
+
+/// After sequential assignment, merge speakers whose centroids are very close.
+/// This recovers from cases where the same speaker was temporarily split
+/// (e.g., due to noise or short segments between utterances).
+private func mergeSimilarSpeakers(labels: [Int], centroids: [[Float]], threshold: Float) -> [Int] {
+    let nSpk = centroids.count
+    guard nSpk > 1 else { return labels }
+
+    // Compute pairwise centroid similarity
+    var mergedTo: [Int] = Array(0..<nSpk)
     var changed = true
 
-    while changed && active.count > 1 {
+    while changed {
         changed = false
-        // Find the most similar pair of clusters
-        var bestI = 0, bestJ = 0
-        var bestSim: Float = -1
-        var pairs: [(Int, Int)] = []
-
-        // Only check pairs in the upper triangle of the cluster pair matrix
-        let activeList = Array(active).sorted()
-        for idx in 0..<activeList.count {
-            for jdx in (idx + 1)..<activeList.count {
-                let ci = activeList[idx]
-                let cj = activeList[jdx]
-
-                // Compute average inter-cluster similarity
-                let membersI = clusters.enumerated().filter { $0.element == ci }.map { $0.offset }
-                let membersJ = clusters.enumerated().filter { $0.element == cj }.map { $0.offset }
-                var totalSim: Float = 0
-                var count = 0
-                for mi in membersI {
-                    for mj in membersJ {
-                        totalSim += sim[mi][mj]
-                        count += 1
+        for i in 0..<nSpk {
+            for j in (i + 1)..<nSpk {
+                let mi = mergedTo[i]
+                let mj = mergedTo[j]
+                if mi == mj { continue }
+                let sim = CAMPlusEmbedder.cosine(centroids[mi], centroids[mj])
+                if sim >= threshold {
+                    // Merge mj into mi
+                    for k in 0..<nSpk {
+                        if mergedTo[k] == mj {
+                            mergedTo[k] = mi
+                        }
                     }
-                }
-                let avgSim = count > 0 ? totalSim / Float(count) : 0
-
-                if avgSim > bestSim {
-                    bestSim = avgSim
-                    bestI = ci
-                    bestJ = cj
-                    pairs = [(ci, cj)]
+                    changed = true
                 }
             }
-        }
-
-        if bestSim > threshold {
-            // Merge bestJ into bestI
-            for k in 0..<n {
-                if clusters[k] == bestJ {
-                    clusters[k] = bestI
-                }
-            }
-            active.remove(bestJ)
-            changed = true
         }
     }
 
-    // Reindex labels to 0, 1, 2, ...
-    let uniqueLabels = Array(Set(clusters)).sorted()
+    // Remap labels
     var labelMap: [Int: Int] = [:]
-    for (newLabel, oldLabel) in uniqueLabels.enumerated() {
-        labelMap[oldLabel] = newLabel
+    var nextLabel = 0
+    for m in mergedTo {
+        if labelMap[m] == nil {
+            labelMap[m] = nextLabel
+            nextLabel += 1
+        }
     }
-    return clusters.map { labelMap[$0] ?? 0 }
+
+    return labels.map { labelMap[mergedTo[$0]] ?? 0 }
 }
 
 /// Run speaker diarization using FluidAudio's Sortformer offline diarizer (≤4 speakers).

@@ -80,11 +80,13 @@ enum CAMPlusModels {
         let cpuConfig = MLModelConfiguration()
         cpuConfig.computeUnits = .cpuOnly
 
-        let gpuConfig = MLModelConfiguration()
-        gpuConfig.computeUnits = .cpuAndGPU
+        // ANE requires fixed-shape inputs. Segments padded to `fixedSampleLength`
+        // ensure the model sees the default shape and runs entirely on Neural Engine.
+        let aneConfig = MLModelConfiguration()
+        aneConfig.computeUnits = .cpuAndNeuralEngine
 
         let preprocessor = try loadModel(at: dir.appendingPathComponent("CamPlusPreprocessor.mlmodelc"), config: cpuConfig)
-        let model = try loadModel(at: dir.appendingPathComponent("CamPlusPlus.mlmodelc"), config: gpuConfig)
+        let model = try loadModel(at: dir.appendingPathComponent("CamPlusPlus.mlmodelc"), config: aneConfig)
 
         return (preprocessor, model)
     }
@@ -140,11 +142,23 @@ actor CAMPlusEmbedder {
         return try embed(samples: samples)
     }
 
+    /// Fixed sample length for ANE residency.
+    /// The model's default shape is [1, 400, 80] (400 fbank frames ≈ 4 s at 16 kHz).
+    /// 400 frames = (N − 400) / 160 + 1  →  N = 64340 samples.
+    /// Segments shorter than this are zero-padded so the model always receives
+    /// its default shape and stays on the Neural Engine.
+    /// Longer segments are used as-is (they fall back to GPU, which is rare).
+    private static let fixedSampleLength = 64_340
+
     /// Embed 16 kHz mono samples ([-1, 1]) → 192-d L2-normalized embedding.
+    /// Shorter segments are zero-padded to `fixedSampleLength` for ANE residency;
+    /// longer segments are processed at their natural length (GPU fallback).
     func embed(samples: [Float]) throws -> [Float] {
         let n = samples.count
-        let wav = try MLMultiArray(shape: [1, n as NSNumber], dataType: .float32)
+        let paddedN = max(n, Self.fixedSampleLength)
+        let wav = try MLMultiArray(shape: [1, paddedN as NSNumber], dataType: .float32)
         let p = wav.dataPointer.assumingMemoryBound(to: Float32.self)
+        // Write signal — the remaining bytes are already zero-initialised
         for i in 0..<n { p[i] = samples[i] * Self.waveformScale }
 
         // Step 1: Preprocessor (waveform → 80-d fbank)
